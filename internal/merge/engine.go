@@ -615,9 +615,7 @@ func mergeDeviceCluster(
 	}
 
 	// Helper to pick prioritized field from observations & detect drift vs manual.
-	pickStr := func(field, manualVal string, precedence []string, getter func(SourceDeviceObs) string) string {
-		var bestVal, bestSrc, bestCol string
-		var bestAt time.Time
+	pickObs := func(precedence []string, allow func(SourceDeviceObs) bool, getter func(SourceDeviceObs) string) (bestVal, bestSrc, bestCol string, bestAt time.Time, bestIsClient bool) {
 		for _, src := range precedence {
 			if src == "manual" {
 				continue
@@ -626,22 +624,30 @@ func mergeDeviceCluster(
 				if o.Source != src {
 					continue
 				}
+				if allow != nil && !allow(o) {
+					continue
+				}
 				if v := strings.TrimSpace(getter(o)); v != "" {
-					bestVal, bestSrc, bestCol, bestAt = v, o.Source, o.CollectorID, o.ObservedAt
-					break
+					return v, o.Source, o.CollectorID, o.ObservedAt, o.Data.IsClient
 				}
 			}
-			if bestVal != "" {
-				break
-			}
+		}
+		return "", "", "", time.Time{}, false
+	}
+	pickStrCustom := func(field, manualVal string, precedence []string, allow func(SourceDeviceObs) bool, getter func(SourceDeviceObs) string, suppressDrift func(manualVal, liveVal, liveSrc string, liveIsClient bool) bool) string {
+		bestVal, bestSrc, bestCol, bestAt, bestIsClient := pickObs(precedence, allow, getter)
+		if bestVal == "" && allow != nil {
+			bestVal, bestSrc, bestCol, bestAt, bestIsClient = pickObs(precedence, nil, getter)
 		}
 		if manualVal != "" {
+			diff := bestVal != "" && !strings.EqualFold(manualVal, bestVal)
+			suppressed := suppressDrift != nil && diff && suppressDrift(manualVal, bestVal, bestSrc, bestIsClient)
 			dev.Provenance = append(dev.Provenance, model.FieldProvenance{
 				Field:          field,
 				Source:         "manual",
-				ManualOverride: bestVal != "" && !strings.EqualFold(manualVal, bestVal),
+				ManualOverride: diff,
 			})
-			if bestVal != "" && !strings.EqualFold(manualVal, bestVal) {
+			if diff && !suppressed {
 				*issues = append(*issues, model.Issue{
 					ID:         fmt.Sprintf("drift:%s:%s", dev.ID, field),
 					Severity:   "warning",
@@ -665,6 +671,9 @@ func mergeDeviceCluster(
 			})
 		}
 		return bestVal
+	}
+	pickStr := func(field, manualVal string, precedence []string, getter func(SourceDeviceObs) string) string {
+		return pickStrCustom(field, manualVal, precedence, nil, getter, nil)
 	}
 
 	// Serial / ServiceTag / SystemUUID
@@ -704,9 +713,24 @@ func mergeDeviceCluster(
 	if c.Manual != nil {
 		manualRole = c.Manual.Role
 	}
-	dev.Role = pickStr("role", manualRole, sourcePrecedenceIdentity, func(o SourceDeviceObs) string {
-		return o.Data.RoleHint
-	})
+	rolePrecedence := []string{"manual", "kubernetes", "snmp", "unifi", "hostos", "redfish", "ipmi", "discovery"}
+	dev.Role = pickStrCustom("role", manualRole, rolePrecedence,
+		func(o SourceDeviceObs) bool {
+			return !(o.Source == "unifi" && o.Data.IsClient)
+		},
+		func(o SourceDeviceObs) string {
+			return o.Data.RoleHint
+		},
+		func(manVal, liveVal, liveSrc string, liveIsClient bool) bool {
+			if liveIsClient && strings.EqualFold(liveVal, "workstation") {
+				return true
+			}
+			if strings.EqualFold(liveVal, "server") && isComputeRole(manVal) {
+				return true
+			}
+			return false
+		},
+	)
 	if dev.Role == "" {
 		dev.Role = inferRole(c.Obs)
 	}
@@ -747,11 +771,13 @@ func mergeDeviceCluster(
 	manualDT := ""
 	manualMfg := ""
 	manualModel := ""
+	manualPartNum := ""
 	if c.Manual != nil && c.Manual.DeviceType != "" {
 		manualDT = c.Manual.DeviceType
 		if dt, ok := dtMap[manualDT]; ok {
 			manualMfg = dt.Manufacturer
 			manualModel = dt.Model
+			manualPartNum = dt.PartNumber
 		}
 	}
 	dev.Manufacturer = pickStr("manufacturer", manualMfg, sourcePrecedenceIdentity, func(o SourceDeviceObs) string {
@@ -760,9 +786,21 @@ func mergeDeviceCluster(
 	if dev.Manufacturer == "" {
 		dev.Manufacturer = inferManufacturer(c.Obs)
 	}
-	dev.Model = pickStr("model", manualModel, sourcePrecedenceIdentity, func(o SourceDeviceObs) string {
-		return o.Data.Model
-	})
+	dev.Model = pickStrCustom("model", manualModel, sourcePrecedenceIdentity, nil,
+		func(o SourceDeviceObs) string {
+			return o.Data.Model
+		},
+		func(manVal, liveVal, _ string, _ bool) bool {
+			if manualDT != "" && strings.EqualFold(liveVal, manualDT) {
+				return true
+			}
+			if manualPartNum != "" && strings.EqualFold(liveVal, manualPartNum) {
+				return true
+			}
+			nMan, nLive := identity.NormalizeSoftName(manVal), identity.NormalizeSoftName(liveVal)
+			return nMan != "" && nMan == nLive
+		},
+	)
 	if manualDT != "" {
 		dev.DeviceType = manualDT
 	} else {
@@ -782,7 +820,10 @@ func mergeDeviceCluster(
 	dev.KernelVersion = pickStr("kernel_version", "", []string{"hostos", "kubernetes"}, func(o SourceDeviceObs) string { return o.Data.KernelVersion })
 	dev.FirmwareVersion = pickStr("firmware_version", "", []string{"redfish", "unifi", "snmp", "ipmi"}, func(o SourceDeviceObs) string { return o.Data.FirmwareVersion })
 	dev.PowerState = pickStr("power_state", "", []string{"redfish", "ipmi"}, func(o SourceDeviceObs) string { return o.Data.PowerState })
-	dev.Description = pickStr("description", manualDesc, sourcePrecedenceIdentity, func(o SourceDeviceObs) string { return o.Data.Description })
+	dev.Description = pickStrCustom("description", manualDesc, sourcePrecedenceIdentity, nil,
+		func(o SourceDeviceObs) string { return o.Data.Description },
+		func(_, _, _ string, _ bool) bool { return true },
+	)
 
 	manualOOB := ""
 	if c.Manual != nil {
@@ -795,30 +836,8 @@ func mergeDeviceCluster(
 	// Interfaces & IPs
 	dev.Interfaces = mergeInterfaces(dev.ID, dev.Name, dev.Platform, c, issues, now)
 
-	// Determine PrimaryIP
-	for _, iface := range dev.Interfaces {
-		for _, ip := range iface.IPAddresses {
-			if ip.Primary {
-				dev.PrimaryIP = ip.IP
-				break
-			}
-		}
-		if dev.PrimaryIP != "" {
-			break
-		}
-	}
-	if dev.PrimaryIP == "" {
-		for _, o := range c.Obs {
-			if ip := identity.NormalizeIP(o.Data.PrimaryIP); ip != "" {
-				dev.PrimaryIP = ip
-				break
-			}
-			if ip := identity.NormalizeIP(o.Data.MgmtIP); ip != "" {
-				dev.PrimaryIP = ip
-				break
-			}
-		}
-	}
+	// Determine PrimaryIP (prefer non-MgmtOnly / non-OOB data-plane IP first).
+	dev.PrimaryIP = selectPrimaryIP(dev.Interfaces, dev.OOBIP, c.Obs)
 
 	// Modules & ModuleBays
 	dev.ModuleBays, dev.Modules = mergeModules(dev.ID, c, mtMap)
@@ -1318,6 +1337,15 @@ func resolveCables(
 		if d == nil {
 			return rawPort
 		}
+		if (rawPort == "" || strings.EqualFold(rawPort, "eth0")) && macHint != "" {
+			if norm, err := identity.NormalizeMAC(macHint); err == nil {
+				for _, iface := range d.Interfaces {
+					if iface.MACAddress == norm && iface.Kind != "virtual" && !isVirtualInterfaceName(iface.Name) {
+						return iface.Name
+					}
+				}
+			}
+		}
 		tryNames := make([]string, 0, len(candidates)+4)
 		if rawPort != "" {
 			tryNames = append(tryNames, rawPort)
@@ -1444,6 +1472,11 @@ func resolveCables(
 			}
 			portA := resolvePort(devA, l.LocalPort, "", l.LocalPortCandidates, l.LocalMAC)
 			portB := resolvePort(devB, l.RemotePort, l.RemotePortDescr, l.RemotePortCandidates, l.RemoteMAC)
+			if l.Method == "snmp_fdb" && strings.Contains(l.Description, "(LAG ") {
+				if _, busy := endpointBusy[devB.ID+":"+portB]; busy {
+					portB = findFreePhysicalPort(devB, endpointBusy)
+				}
+			}
 			conf := tier.conf
 			if l.Verified {
 				conf = "verified"
@@ -1460,7 +1493,32 @@ func resolveCables(
 	return out
 }
 
+func findFreePhysicalPort(d *model.Device, endpointBusy map[string]string) string {
+	for _, iface := range d.Interfaces {
+		if iface.MgmtOnly || iface.Kind == "virtual" || iface.Kind == "lag" || isVirtualInterfaceName(iface.Name) {
+			continue
+		}
+		if _, busy := endpointBusy[d.ID+":"+iface.Name]; !busy {
+			return iface.Name
+		}
+	}
+	for n := 2; n < 64; n++ {
+		cand := fmt.Sprintf("nic%d", n)
+		if _, busy := endpointBusy[d.ID+":"+cand]; !busy {
+			return cand
+		}
+	}
+	return "nic2"
+}
+
 func findMatchingInterface(oi protocol.InterfaceObservation, platform string, byName map[string]*ifaceBuilder, byMAC map[string]*ifaceBuilder) *ifaceBuilder {
+	if oi.MAC != "" {
+		if norm, err := identity.NormalizeMAC(oi.MAC); err == nil && !identity.IsInvalidMAC(norm) {
+			if b, ok := byMAC[norm]; ok {
+				return b
+			}
+		}
+	}
 	tryNames := make([]string, 0, len(oi.Candidates)+4)
 	if oi.Name != "" {
 		tryNames = append(tryNames, oi.Name)
@@ -1478,13 +1536,6 @@ func findMatchingInterface(oi protocol.InterfaceObservation, platform string, by
 		}
 		for k, b := range byName {
 			if strings.EqualFold(k, n) {
-				return b
-			}
-		}
-	}
-	if oi.MAC != "" {
-		if norm, err := identity.NormalizeMAC(oi.MAC); err == nil {
-			if b, ok := byMAC[norm]; ok {
 				return b
 			}
 		}
@@ -1669,6 +1720,105 @@ func firstSourceOrManual(c identityCluster) string {
 		return c.Obs[0].Source
 	}
 	return "auto"
+}
+
+func isComputeRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "server", "control-plane", "worker", "storage", "hypervisor":
+		return true
+	}
+	return false
+}
+
+func selectPrimaryIP(ifaces []model.Interface, oobIP string, obs []SourceDeviceObs) string {
+	sourceRank := func(srcs []string) int {
+		order := []string{"manual", "kubernetes", "hostos", "unifi", "snmp", "lldp", "redfish", "ipmi", "discovery"}
+		best := 99
+		for _, s := range srcs {
+			for idx, p := range order {
+				if s == p && idx < best {
+					best = idx
+				}
+			}
+		}
+		return best
+	}
+
+	// Pass (a): ip.Primary on non-MgmtOnly interface where ip != oobIP
+	bestIP := ""
+	bestRank := 999
+	for _, iface := range ifaces {
+		if iface.MgmtOnly {
+			continue
+		}
+		for _, ip := range iface.IPAddresses {
+			if ip.Primary && ip.IP != "" && ip.IP != oobIP {
+				if r := sourceRank(ip.Sources); r < bestRank {
+					bestRank = r
+					bestIP = ip.IP
+				}
+			}
+		}
+	}
+	if bestIP != "" {
+		return bestIP
+	}
+
+	// Pass (b): any IP on non-MgmtOnly interface where ip != oobIP
+	bestRank = 999
+	for _, iface := range ifaces {
+		if iface.MgmtOnly {
+			continue
+		}
+		for _, ip := range iface.IPAddresses {
+			if ip.IP != "" && ip.IP != oobIP {
+				if r := sourceRank(ip.Sources); r < bestRank {
+					bestRank = r
+					bestIP = ip.IP
+				}
+			}
+		}
+	}
+	if bestIP != "" {
+		return bestIP
+	}
+
+	// Pass (c): observation PrimaryIP where ip != oobIP
+	for _, src := range []string{"kubernetes", "hostos", "unifi", "snmp", "discovery", "lldp", "redfish", "ipmi"} {
+		for _, o := range obs {
+			if o.Source != src {
+				continue
+			}
+			if ip := identity.NormalizeIP(o.Data.PrimaryIP); ip != "" && ip != oobIP {
+				return ip
+			}
+		}
+	}
+
+	// Pass (d): fallback to MgmtOnly primary -> any interface IP -> oobIP -> MgmtIP
+	for _, iface := range ifaces {
+		for _, ip := range iface.IPAddresses {
+			if ip.Primary && ip.IP != "" {
+				return ip.IP
+			}
+		}
+	}
+	for _, iface := range ifaces {
+		for _, ip := range iface.IPAddresses {
+			if ip.IP != "" {
+				return ip.IP
+			}
+		}
+	}
+	if oobIP != "" {
+		return oobIP
+	}
+	for _, o := range obs {
+		if ip := identity.NormalizeIP(o.Data.MgmtIP); ip != "" {
+			return ip
+		}
+	}
+	return ""
 }
 
 func sortState(state *model.CanonicalState) {

@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -166,7 +167,7 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 					}
 				}
 				redfishOK := false
-				if config.IsEnabled(p.ProbeRedfish) && (containsInt(open, 443) || len(open) == 0) {
+				if config.IsEnabled(p.ProbeRedfish) && containsInt(open, 443) {
 					redfishOK = probeRedfishEndpoint(ctx, targetIP, timeout)
 				}
 				snmpOK := false
@@ -229,13 +230,28 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 			}
 
 			var ifaces []protocol.InterfaceObservation
-			ifaces = append(ifaces, protocol.InterfaceObservation{
-				Name:        "eth0",
-				Type:        "1000base-t",
-				Kind:        "physical",
-				MAC:         r.mac,
-				IPAddresses: []protocol.IPObservation{{Address: r.ip + "/24", DNSName: r.hostname, Primary: true}},
-			})
+			primaryIP := r.ip
+			oobIP := ""
+			if r.hasRedfish {
+				oobIP = r.ip
+				primaryIP = ""
+				ifaces = append(ifaces, protocol.InterfaceObservation{
+					Name:        "iDRAC",
+					Type:        "1000base-t",
+					Kind:        "oob",
+					MgmtOnly:    true,
+					MAC:         r.mac,
+					IPAddresses: []protocol.IPObservation{{Address: r.ip + "/24", DNSName: r.hostname, Primary: false}},
+				})
+			} else {
+				ifaces = append(ifaces, protocol.InterfaceObservation{
+					Name:        "eth0",
+					Type:        "1000base-t",
+					Kind:        "physical",
+					MAC:         r.mac,
+					IPAddresses: []protocol.IPObservation{{Address: r.ip + "/24", DNSName: r.hostname, Primary: true}},
+				})
+			}
 
 			devs = append(devs, protocol.DeviceObservation{
 				ObsKey:       firstNonEmpty(r.mac, r.ip),
@@ -244,7 +260,8 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 				RoleHint:     role,
 				Manufacturer: mfg,
 				Status:       "active",
-				PrimaryIP:    r.ip,
+				PrimaryIP:    primaryIP,
+				OOBIP:        oobIP,
 				Claims:       claims,
 				Interfaces:   ifaces,
 				Attributes:   map[string]any{"open_ports": r.openPorts},
@@ -376,17 +393,29 @@ func tcpReachable(ctx context.Context, ip string, port int, timeout time.Duratio
 }
 
 func probeRedfishEndpoint(ctx context.Context, ip string, timeout time.Duration) bool {
+	return ProbeRedfishURL(ctx, "https://"+ip, timeout)
+}
+
+func ProbeRedfishURL(ctx context.Context, baseURL string, timeout time.Duration) bool {
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+ip+"/redfish/v1", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/redfish/v1", nil)
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusUnauthorized
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusOK {
+		s := string(body)
+		return strings.Contains(s, "RedfishVersion") || strings.Contains(s, "@odata.id")
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return strings.TrimSpace(resp.Header.Get("OData-Version")) != ""
+	}
+	return false
 }
 
 func reverseLookup(ctx context.Context, ip string, timeout time.Duration) string {

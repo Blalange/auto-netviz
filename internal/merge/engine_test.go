@@ -275,3 +275,135 @@ func TestManualConflictAndCableResolution(t *testing.T) {
 		t.Fatalf("expected bidirectional LLDP confidence=verified, got %q", res.State.Cables[0].Confidence)
 	}
 }
+
+func TestDisjointSerialsGenericHostDriftSuppressionOOBAndLAG(t *testing.T) {
+	now := time.Now().UTC()
+	vlan4 := 4
+	inv := &manual.Inventory{
+		Defaults: manual.Defaults{Site: "glemmen"},
+		Rules:    manual.EffectiveRules{AutoNetworkDevices: true, AutoServers: true, AutoWiredClients: true},
+		DeviceTypes: []manual.DeviceTypeSpec{
+			{ID: "ubiquiti-udm-pro", Manufacturer: "Ubiquiti", Model: "UniFi Dream Machine Pro", PartNumber: "UDM-PRO", RoleHint: "gateway"},
+			{ID: "dell-poweredge-r250", Manufacturer: "Dell", Model: "PowerEdge R250", PartNumber: "R250", RoleHint: "server"},
+			{ID: "cisco-n3k-c3048tp-1ge", Manufacturer: "Cisco", Model: "N3K-C3048TP-1GE", RoleHint: "switch"},
+		},
+		Devices: []manual.DeviceSpec{
+			{
+				Name: "server190", Site: "glemmen", Role: "server", DeviceType: "dell-poweredge-r250",
+				OOBIP: "192.168.4.190", Description: "Manual server desc",
+				Identity: &manual.IdentitySpec{ServiceTag: "3L51JZ3", SystemUUID: "33333333-3333-3333-3333-333333333333", MACs: []string{"6c:3c:8c:75:3c:c4"}},
+				Interfaces: []manual.InterfaceSpec{
+					{Name: "iDRAC", MgmtOnly: true, MACAddress: "6c:3c:8c:75:3c:be", UntaggedVLAN: &vlan4, IPAddresses: []manual.IPSpec{{Address: "192.168.4.190/24"}}},
+				},
+			},
+			{
+				Name: "glemmen80", Site: "glemmen", Role: "worker", DeviceType: "dell-poweredge-r250",
+				OOBIP: "192.168.4.80",
+				Identity: &manual.IdentitySpec{ServiceTag: "9SYD132", SystemUUID: "88888888-8888-8888-8888-888888888888"},
+				Interfaces: []manual.InterfaceSpec{
+					{Name: "iDRAC", MgmtOnly: true, UntaggedVLAN: &vlan4, IPAddresses: []manual.IPSpec{{Address: "192.168.4.80/24"}}},
+				},
+			},
+			{
+				Name: "udm", Site: "glemmen", Role: "gateway", DeviceType: "ubiquiti-udm-pro",
+				Identity: &manual.IdentitySpec{Serial: "UDM1"},
+			},
+			{
+				Name: "nexus", Site: "glemmen", Role: "switch", DeviceType: "cisco-n3k-c3048tp-1ge",
+				OOBIP: "192.168.4.2",
+				Identity: &manual.IdentitySpec{Serial: "FOC123"},
+				Interfaces: []manual.InterfaceSpec{
+					{Name: "Port 1", Kind: "physical"},
+					{Name: "Port 21", Kind: "physical"},
+					{Name: "Port 22", Kind: "physical"},
+				},
+			},
+		},
+		RackPlans: make(map[string]manual.RackPlan),
+	}
+
+	rawObs := []db.StoredObservation{
+		// Both Redfish obs wrongly report HostName="dellinc" -> must NOT trigger merge_conflict across disjoint serials/UUIDs!
+		{
+			ID: 1, CollectorID: "c1", Site: "glemmen", Source: "redfish", Kind: "device", ObsKey: "192.168.4.190", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.DeviceObservation{
+				ObsKey: "192.168.4.190", Site: "glemmen", Name: "dellinc", RoleHint: "server", Manufacturer: "Dell", Model: "PowerEdge R250",
+				Serial: "3L51JZ3", ServiceTag: "3L51JZ3", SystemUUID: "33333333-3333-3333-3333-333333333333", OOBIP: "192.168.4.190",
+				Claims: protocol.IdentityClaims{Hostnames: []string{"dellinc"}, UUIDs: []string{"33333333-3333-3333-3333-333333333333"}, Serials: []string{"3L51JZ3"}, Locators: map[string]string{"oob_ip": "192.168.4.190"}},
+			}),
+		},
+		{
+			ID: 2, CollectorID: "c1", Site: "glemmen", Source: "redfish", Kind: "device", ObsKey: "192.168.4.80", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.DeviceObservation{
+				ObsKey: "192.168.4.80", Site: "glemmen", Name: "dellinc", RoleHint: "server", Manufacturer: "Dell", Model: "PowerEdge R250",
+				Serial: "9SYD132", ServiceTag: "9SYD132", SystemUUID: "88888888-8888-8888-8888-888888888888", OOBIP: "192.168.4.80",
+				Claims: protocol.IdentityClaims{Hostnames: []string{"dellinc"}, UUIDs: []string{"88888888-8888-8888-8888-888888888888"}, Serials: []string{"9SYD132"}, Locators: map[string]string{"oob_ip": "192.168.4.80"}},
+			}),
+		},
+		// UniFi client reporting RoleHint="workstation" + data IP + iDRAC MAC -> MAC must match iDRAC, non-OOB IP must win PrimaryIP, no role/desc drift!
+		{
+			ID: 3, CollectorID: "c1", Site: "glemmen", Source: "unifi", Kind: "device", ObsKey: "6c:3c:8c:75:3c:c4", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.DeviceObservation{
+				ObsKey: "6c:3c:8c:75:3c:c4", Site: "glemmen", Name: "server190", RoleHint: "workstation", IsClient: true, PrimaryIP: "192.168.6.190", Description: "Live client",
+				Claims: protocol.IdentityClaims{MACs: []string{"6c:3c:8c:75:3c:c4"}, Locators: map[string]string{"unifi_ip": "192.168.6.190"}},
+				Interfaces: []protocol.InterfaceObservation{
+					{Name: "eth0", Kind: "physical", MAC: "6c:3c:8c:75:3c:c4", IPAddresses: []protocol.IPObservation{{Address: "192.168.6.190/24", Primary: true}}},
+					{Name: "eth0", Kind: "physical", MAC: "6c:3c:8c:75:3c:be", IPAddresses: []protocol.IPObservation{{Address: "192.168.4.190/24", Primary: true}}},
+				},
+			}),
+		},
+		// UniFi device reporting slug model "ubiquiti-udm-pro" -> must NOT emit model drift vs manual "UniFi Dream Machine Pro"
+		{
+			ID: 4, CollectorID: "c1", Site: "glemmen", Source: "unifi", Kind: "device", ObsKey: "udm", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.DeviceObservation{
+				ObsKey: "udm", Site: "glemmen", Name: "udm", RoleHint: "gateway", Manufacturer: "Ubiquiti", Model: "ubiquiti-udm-pro", Serial: "UDM1",
+				Claims: protocol.IdentityClaims{Serials: []string{"UDM1"}},
+			}),
+		},
+		// Two LAG FDB links to same server MAC -> must create 2 cables on distinct server ports, plus iDRAC FDB link -> must resolve to iDRAC port!
+		{
+			ID: 5, CollectorID: "c1", Site: "glemmen", Source: "snmp", Kind: "link", ObsKey: "lag1", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.LinkObservation{
+				ObsKey: "lag1", Site: "glemmen", Method: "snmp_fdb", LocalDeviceName: "nexus", LocalPort: "Port 21",
+				RemoteMAC: "6c:3c:8c:75:3c:c4", Description: "Inferred via SNMP FDB (LAG port-channel10)",
+			}),
+		},
+		{
+			ID: 6, CollectorID: "c1", Site: "glemmen", Source: "snmp", Kind: "link", ObsKey: "lag2", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.LinkObservation{
+				ObsKey: "lag2", Site: "glemmen", Method: "snmp_fdb", LocalDeviceName: "nexus", LocalPort: "Port 22",
+				RemoteMAC: "6c:3c:8c:75:3c:c4", Description: "Inferred via SNMP FDB (LAG port-channel10)",
+			}),
+		},
+		{
+			ID: 7, CollectorID: "c1", Site: "glemmen", Source: "snmp", Kind: "link", ObsKey: "idrac", ObservedAt: now,
+			PayloadJSON: mustJSON(t, protocol.LinkObservation{
+				ObsKey: "idrac", Site: "glemmen", Method: "snmp_fdb", LocalDeviceName: "nexus", LocalPort: "Port 1",
+				RemoteMAC: "6c:3c:8c:75:3c:be", Description: "Inferred via SNMP FDB",
+			}),
+		},
+	}
+
+	res, err := Merge(inv, rawObs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.State.Issues) != 0 {
+		t.Fatalf("expected 0 issues, got %+v", res.State.Issues)
+	}
+	if len(res.State.Cables) != 3 {
+		t.Fatalf("expected 3 cables (2 LAG members + 1 iDRAC), got %d (%+v)", len(res.State.Cables), res.State.Cables)
+	}
+	for _, d := range res.State.Devices {
+		if d.Name == "server190" {
+			if d.PrimaryIP != "192.168.6.190" {
+				t.Fatalf("expected non-OOB PrimaryIP 192.168.6.190, got %q", d.PrimaryIP)
+			}
+			for _, iface := range d.Interfaces {
+				if iface.Name == "iDRAC" && len(iface.IPAddresses) != 1 {
+					t.Fatalf("expected iDRAC IP count 1, got %+v", iface.IPAddresses)
+				}
+			}
+		}
+	}
+}

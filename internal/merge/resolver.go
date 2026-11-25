@@ -118,14 +118,14 @@ func (uf *unionFind) tryUnion(a, b int, reasonKey string, enforceAllTier1 bool) 
 	if ra == rb {
 		return true, ""
 	}
-	if uf.manual[ra] >= 0 && uf.manual[rb] >= 0 {
-		return false, fmt.Sprintf("conflicting manual identity %s claimed by both %q and %q", reasonKey, uf.manName[ra], uf.manName[rb])
-	}
 	if setsDisjointNonEmpty(uf.uuids[ra], uf.uuids[rb]) {
 		return false, ""
 	}
 	if enforceAllTier1 && setsDisjointNonEmpty(uf.serials[ra], uf.serials[rb]) {
 		return false, ""
+	}
+	if uf.manual[ra] >= 0 && uf.manual[rb] >= 0 {
+		return false, fmt.Sprintf("conflicting manual identity %s claimed by both %q and %q", reasonKey, uf.manName[ra], uf.manName[rb])
 	}
 	// Keep manual root or lower root as parent.
 	if uf.manual[rb] >= 0 && uf.manual[ra] < 0 {
@@ -456,7 +456,7 @@ func extractManualNode(idx int, d manual.DeviceSpec, defaultSite string) identit
 			addMAC(iface.MACAddress)
 		}
 		for _, ip := range iface.IPAddresses {
-			if normIP := identity.NormalizeIP(ip.Address); normIP != "" && ip.Primary {
+			if normIP := identity.NormalizeIP(ip.Address); normIP != "" {
 				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("ip:%s:%s", site, normIP))
 			}
 		}
@@ -464,6 +464,7 @@ func extractManualNode(idx int, d manual.DeviceSpec, defaultSite string) identit
 	if d.OOBIP != "" {
 		if normIP := identity.NormalizeIP(d.OOBIP); normIP != "" {
 			n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("oob:%s:%s", site, normIP))
+			n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("ip:%s:%s", site, normIP))
 		}
 	}
 
@@ -478,12 +479,14 @@ func extractManualNode(idx int, d manual.DeviceSpec, defaultSite string) identit
 			if ip := identity.NormalizeIP(d.Collect.Redfish.IP); ip != "" {
 				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("redfish:%s:%s", site, ip))
 				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("oob:%s:%s", site, ip))
+				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("ip:%s:%s", site, ip))
 			}
 		}
 		if d.Collect.IPMI != nil && d.Collect.IPMI.IP != "" {
 			if ip := identity.NormalizeIP(d.Collect.IPMI.IP); ip != "" {
 				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("ipmi:%s:%s", site, ip))
 				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("oob:%s:%s", site, ip))
+				n.tier3Keys = append(n.tier3Keys, fmt.Sprintf("ip:%s:%s", site, ip))
 			}
 		}
 		if d.Collect.SSH != nil {
@@ -642,13 +645,13 @@ func extractObsNode(idx int, o SourceDeviceObs, defaultSite string) identityNode
 	}
 
 	for _, host := range append([]string{d.Name}, d.Claims.Hostnames...) {
-		if host == "" {
+		if host == "" || isGenericHostname(host) {
 			continue
 		}
-		if soft := identity.NormalizeSoftName(identity.ShortHostname(host)); soft != "" {
+		if soft := identity.NormalizeSoftName(identity.ShortHostname(host)); soft != "" && !isGenericHostname(soft) {
 			n.tier4Keys = append(n.tier4Keys, fmt.Sprintf("name:%s:%s", site, soft))
 		}
-		if softFull := identity.NormalizeSoftName(host); softFull != "" {
+		if softFull := identity.NormalizeSoftName(host); softFull != "" && !isGenericHostname(softFull) {
 			n.tier4Keys = append(n.tier4Keys, fmt.Sprintf("full:%s:%s", site, softFull))
 		}
 	}
@@ -699,6 +702,21 @@ func sortedKeys(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func isGenericHostname(raw string) bool {
+	norm := identity.NormalizeSoftName(raw)
+	short := identity.NormalizeSoftName(identity.ShortHostname(raw))
+	for _, v := range []string{norm, short} {
+		switch v {
+		case "dellinc", "dell", "localhost", "localhostlocaldomain", "idrac",
+			"ubuntu", "debian", "linux", "talos", "unifi", "unifilocaldomain",
+			"server", "switch", "gateway", "router", "default", "unknown",
+			"quantacomputerinc", "supermicro", "hp", "hpe":
+			return true
+		}
+	}
+	return false
 }
 
 func shortHash(s string) string {

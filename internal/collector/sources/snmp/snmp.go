@@ -56,13 +56,19 @@ const (
 	oidLLDPRemPortDesc = "1.0.8802.1.1.2.1.4.1.1.8"
 	oidLLDPRemSysName  = "1.0.8802.1.1.2.1.4.1.1.9"
 
+	oidQBridgeFdbPort  = "1.3.6.1.2.1.17.7.1.2.2.1.2"
+	oidLagAttachedAgg  = "1.2.840.10006.300.43.1.2.1.1.13"
+	oidCiscoVtpVlan    = "1.3.6.1.4.1.9.9.46.1.3.1.1.4"
+	oidCiscoVmVlan     = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"
+	oidCiscoTrunkStat  = "1.3.6.1.4.1.9.9.46.1.6.1.1.14"
+
 	oidCDPCacheDevID = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
 	oidCDPCachePort  = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
 )
 
 var (
 	rePortNumber = regexp.MustCompile(`(?i)^Port\s+(\d+)$`)
-	reVirtualIf  = regexp.MustCompile(`(?i)^(?:lo|vlan|br|bond|lag|po|mgmt|enif|cpu|tunnel|ipmi|docker|veth|virbr)\d*`)
+	reVirtualIf  = regexp.MustCompile(`(?i)^(?:lo|vlan|br|bond|lag|po|port-channel|mgmt|enif|cpu|tunnel|ipmi|docker|veth|virbr)\d*`)
 )
 
 type Source struct {
@@ -90,6 +96,7 @@ type targetJob struct {
 	portNames  string
 	ifacesMode bool
 	cablesMode bool
+	autoUniFi  bool
 	profile    config.SNMPProfile
 }
 
@@ -97,7 +104,7 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 	seen := make(map[string]struct{})
 	var jobs []targetJob
 
-	addTarget := func(ip, name, site, role string, tags []string, explicit, portMode string, profOverride *config.SNMPProfile) {
+	addTarget := func(ip, name, site, role string, tags []string, explicit, portMode string, autoUniFi bool, profOverride *config.SNMPProfile) {
 		ip = identity.NormalizeIP(ip)
 		if ip == "" {
 			return
@@ -129,7 +136,7 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 		seen[key] = struct{}{}
 		jobs = append(jobs, targetJob{
 			ip: ip, name: name, site: site, role: role, tags: tags,
-			portNames: portMode, profile: *prof,
+			portNames: portMode, autoUniFi: autoUniFi, profile: *prof,
 		})
 	}
 
@@ -144,13 +151,13 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 				ip = t.Host
 			}
 			pCopy := p
-			addTarget(ip, t.Name, t.Site, t.Role, nil, p.Name, p.PortNames, &pCopy)
+			addTarget(ip, t.Name, t.Site, t.Role, nil, p.Name, p.PortNames, false, &pCopy)
 		}
 	}
 	// 2. Manual YAML hints
 	for _, h := range rt.Hints {
 		if h.SNMPIP != "" {
-			addTarget(h.SNMPIP, h.DeviceName, h.Site, h.Role, h.Tags, h.SNMPCredential, "", nil)
+			addTarget(h.SNMPIP, h.DeviceName, h.Site, h.Role, h.Tags, h.SNMPCredential, "", false, nil)
 		}
 	}
 	// 3. Active UniFi targets (auto_unifi)
@@ -158,13 +165,13 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 		for _, u := range rt.Shared.UniFi() {
 			prof, err := config.MatchSNMPProfile(s.Profiles, u.SNMPCredential, u.Site, u.Name, "switch", nil, u.IP)
 			if err == nil && config.IsEnabled(prof.AutoUniFi) {
-				addTarget(u.IP, u.Name, u.Site, "switch", nil, prof.Name, prof.PortNames, prof)
+				addTarget(u.IP, u.Name, u.Site, "switch", nil, prof.Name, prof.PortNames, true, prof)
 			}
 		}
 		// 4. Discovered SNMP endpoints
 		for _, pr := range rt.Shared.Probed() {
 			if pr.HasSNMP {
-				addTarget(pr.IP, "", pr.Site, "switch", nil, "", "", nil)
+				addTarget(pr.IP, "", pr.Site, "switch", nil, "", "", false, nil)
 			}
 		}
 	}
@@ -215,6 +222,10 @@ func (s *Source) Collect(ctx context.Context, rt sources.Runtime) ([]protocol.Ob
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
+					if j.autoUniFi && isExpectedSNMPUnavailable(err) {
+						rt.Log.Debug("skipping auto-unifi target without SNMP", "target", j.name, "ip", j.ip, "err", err)
+						return
+					}
 					errs = append(errs, fmt.Sprintf("%s: %v", j.ip, err))
 					return
 				}
@@ -390,6 +401,11 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 
 	fdbAddrs := walkTable(oidFdbAddress)
 	fdbPorts := walkTable(oidFdbPort)
+	qFdbPorts := walkTable(oidQBridgeFdbPort)
+	lagAttachedRaw := walkTable(oidLagAttachedAgg)
+	ciscoVtpVlansRaw := walkTable(oidCiscoVtpVlan)
+	ciscoVmVlansRaw := walkTable(oidCiscoVmVlan)
+	ciscoTrunkRaw := walkTable(oidCiscoTrunkStat)
 
 	cdpDevIDs := walkTable(oidCDPCacheDevID)
 	cdpPorts := walkTable(oidCDPCachePort)
@@ -470,6 +486,23 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 			vlanNames[vid] = pduText(pdu)
 		}
 	}
+	for oid, pdu := range ciscoVtpVlansRaw {
+		if vid := lastCiscoVlanSuffix(oid, oidCiscoVtpVlan); vid > 0 && (vid < 1002 || vid > 1005) {
+			if _, exists := vlanNames[vid]; !exists {
+				if vName := pduText(pdu); vName != "" {
+					vlanNames[vid] = vName
+				}
+			}
+		}
+	}
+
+	ciscoTrunk := make(map[int]bool)
+	for oid, pdu := range ciscoTrunkRaw {
+		if idx := lastIntSuffix(oid, oidCiscoTrunkStat); idx > 0 && pduInt(pdu) == 1 {
+			ciscoTrunk[idx] = true
+		}
+	}
+
 	egress := make(map[int]map[int]bool)
 	for oid, pdu := range vlanEgressRaw {
 		if vid := lastIntSuffix(oid, oidVlanEgress); vid > 0 {
@@ -538,14 +571,51 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 			tagged   []int
 		}{untagged: uVID, tagged: tList}
 	}
+	for oid, pdu := range ciscoVmVlansRaw {
+		if idx := lastIntSuffix(oid, oidCiscoVmVlan); idx > 0 {
+			if vid := pduInt(pdu); vid > 0 {
+				cur := ifVLANs[idx]
+				if cur.untagged == 0 {
+					cur.untagged = vid
+					ifVLANs[idx] = cur
+				}
+			}
+		}
+	}
+
+	lagMembers := make(map[int][]int)
+	for oid, pdu := range lagAttachedRaw {
+		memIdx := lastIntSuffix(oid, oidLagAttachedAgg)
+		aggIdx := pduInt(pdu)
+		if memIdx > 0 && aggIdx > 0 {
+			if memIf, ok := ifMap[memIdx]; ok && memIf.oper == 1 {
+				lagMembers[aggIdx] = append(lagMembers[aggIdx], memIdx)
+			}
+		}
+	}
+	for aggIdx, mems := range lagMembers {
+		sort.Slice(mems, func(i, j int) bool {
+			ni, nj := identity.PortSortNumber(ifMap[mems[i]].name), identity.PortSortNumber(ifMap[mems[j]].name)
+			if ni != nj && ni > 0 && nj > 0 {
+				return ni < nj
+			}
+			return mems[i] < mems[j]
+		})
+		lagMembers[aggIdx] = mems
+	}
 
 	macCounts := make(map[string]int)
+	switchMACs := make(map[string]bool)
+	if baseMAC != "" {
+		switchMACs[baseMAC] = true
+	}
 	var indices []int
 	for idx, r := range ifMap {
 		indices = append(indices, idx)
 		r.candidates = identity.PortCandidates(r.name, r.alias, r.descr)
 		if r.mac != "" {
 			macCounts[r.mac]++
+			switchMACs[r.mac] = true
 		}
 	}
 	sort.Ints(indices)
@@ -562,8 +632,9 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 		en := r.admin != 2
 		up := r.oper == 1
 		vInfo := ifVLANs[idx]
+		isTrunk := len(vInfo.tagged) > 0 || ciscoTrunk[idx]
 		mode := ""
-		if len(vInfo.tagged) > 0 {
+		if isTrunk {
 			mode = "tagged"
 		} else if vInfo.untagged > 0 {
 			mode = "access"
@@ -587,7 +658,7 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 			Mode:         mode,
 			UntaggedVLAN: vInfo.untagged,
 			TaggedVLANs:  vInfo.tagged,
-			IsTrunk:      len(vInfo.tagged) > 0,
+			IsTrunk:      isTrunk,
 		})
 	}
 
@@ -763,39 +834,38 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 		})
 	}
 
-	// FDB access-port inference (skip trunk ports, skip MACs seen on multiple ports, skip ports with >1 MAC)
-	portFdbMACs := make(map[string]map[string]bool)
-	macPorts := make(map[string]map[string]bool)
+	// FDB access-port and LACP LAG inference (BRIDGE-MIB + Q-BRIDGE-MIB)
+	bpFdbMACs := make(map[int]map[string]bool)
+	macBPs := make(map[string]map[int]bool)
+	recordFDB := func(bp int, mac string) {
+		if bp <= 0 || mac == "" || identity.IsInvalidMAC(mac) || switchMACs[mac] {
+			return
+		}
+		if _, ok := portIfIdx[bp]; !ok {
+			return
+		}
+		if bpFdbMACs[bp] == nil {
+			bpFdbMACs[bp] = make(map[string]bool)
+		}
+		bpFdbMACs[bp][mac] = true
+		if macBPs[mac] == nil {
+			macBPs[mac] = make(map[int]bool)
+		}
+		macBPs[mac][bp] = true
+	}
 	for oid, macPdu := range fdbAddrs {
 		suf := strings.TrimPrefix(oid, oidFdbAddress+".")
-		mac := pduMAC(macPdu)
-		if mac == "" || identity.IsInvalidMAC(mac) {
-			continue
-		}
 		bpPdu, ok := fdbPorts[oidFdbPort+"."+suf]
 		if !ok {
 			continue
 		}
-		bp := pduInt(bpPdu)
-		idx := portIfIdx[bp]
-		if len(ifVLANs[idx].tagged) > 0 {
-			// Trunk port learns downstream MACs; cannot prove direct cable.
-			continue
-		}
-		localPort := ifNameByIdx[idx]
-		if localPort == "" || lldpSeenPort[localPort] {
-			continue
-		}
-		if portFdbMACs[localPort] == nil {
-			portFdbMACs[localPort] = make(map[string]bool)
-		}
-		portFdbMACs[localPort][mac] = true
-		if macPorts[mac] == nil {
-			macPorts[mac] = make(map[string]bool)
-		}
-		macPorts[mac][localPort] = true
+		recordFDB(pduInt(bpPdu), pduMAC(macPdu))
 	}
-	for port, macs := range portFdbMACs {
+	for oid, bpPdu := range qFdbPorts {
+		recordFDB(pduInt(bpPdu), ParseQBridgeMAC(oid))
+	}
+
+	for bp, macs := range bpFdbMACs {
 		if len(macs) != 1 {
 			continue
 		}
@@ -803,19 +873,61 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 		for m := range macs {
 			singleMAC = m
 		}
-		if len(macPorts[singleMAC]) != 1 {
+		if len(macBPs[singleMAC]) != 1 {
 			continue
 		}
+		idx := portIfIdx[bp]
+		if mems := lagMembers[idx]; len(mems) > 0 {
+			lagName := fmt.Sprintf("agg-%d", idx)
+			if r := ifMap[idx]; r != nil && r.name != "" {
+				lagName = r.name
+			}
+			for _, memIdx := range mems {
+				memPort := ifNameByIdx[memIdx]
+				if memPort == "" || lldpSeenPort[memPort] {
+					continue
+				}
+				memSpeed := 0
+				if r := ifMap[memIdx]; r != nil {
+					memSpeed = r.speed
+				}
+				links = append(links, protocol.LinkObservation{
+					ObsKey:          fmt.Sprintf("snmp-fdb:%s:%s->%s", job.ip, memPort, singleMAC),
+					Site:            job.site,
+					Method:          "snmp_fdb",
+					LocalObsKey:     job.ip,
+					LocalDeviceName: devName,
+					LocalMAC:        baseMAC,
+					LocalIP:         job.ip,
+					LocalPort:       memPort,
+					RemoteMAC:       singleMAC,
+					CableType:       cableTypeFromSpeed(memSpeed),
+					SpeedMbps:       memSpeed,
+					Description:     fmt.Sprintf("Inferred via SNMP FDB (LAG %s)", lagName),
+				})
+			}
+			continue
+		}
+		localPort := ifNameByIdx[idx]
+		if localPort == "" || lldpSeenPort[localPort] {
+			continue
+		}
+		pSpeed := 0
+		if r := ifMap[idx]; r != nil {
+			pSpeed = r.speed
+		}
 		links = append(links, protocol.LinkObservation{
-			ObsKey:          fmt.Sprintf("snmp-fdb:%s:%s->%s", job.ip, port, singleMAC),
+			ObsKey:          fmt.Sprintf("snmp-fdb:%s:%s->%s", job.ip, localPort, singleMAC),
 			Site:            job.site,
 			Method:          "snmp_fdb",
 			LocalObsKey:     job.ip,
 			LocalDeviceName: devName,
 			LocalMAC:        baseMAC,
 			LocalIP:         job.ip,
-			LocalPort:       port,
+			LocalPort:       localPort,
 			RemoteMAC:       singleMAC,
+			CableType:       cableTypeFromSpeed(pSpeed),
+			SpeedMbps:       pSpeed,
 			Description:     "Inferred via SNMP FDB",
 		})
 	}
@@ -824,6 +936,9 @@ func pollDevice(ctx context.Context, baseDir string, k8s *config.K8sResolver, jo
 }
 
 func pickPortName(name, alias, descr string, candidates []string, mode string) string {
+	if strings.EqualFold(strings.TrimSpace(name), "mgmt0") {
+		return "mgmt0"
+	}
 	if mode == "auto" || mode == "port-number" {
 		for _, c := range candidates {
 			if m := rePortNumber.FindStringSubmatch(c); m != nil {
@@ -930,6 +1045,63 @@ func parseBitmap(data []byte) map[int]bool {
 		}
 	}
 	return out
+}
+
+func ParseQBridgeMAC(oid string) string {
+	prefix := strings.TrimPrefix(oidQBridgeFdbPort, ".") + "."
+	rest := strings.TrimPrefix(strings.TrimPrefix(oid, "."), prefix)
+	if rest == "" {
+		return ""
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) < 7 {
+		return ""
+	}
+	macParts := parts[len(parts)-6:]
+	var b [6]byte
+	for i, p := range macParts {
+		v, err := strconv.Atoi(p)
+		if err != nil || v < 0 || v > 255 {
+			return ""
+		}
+		b[i] = byte(v)
+	}
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5])
+}
+
+func lastCiscoVlanSuffix(oid, base string) int {
+	prefix := strings.TrimPrefix(base, ".") + "."
+	rest := strings.TrimPrefix(strings.TrimPrefix(oid, "."), prefix)
+	if rest == "" {
+		return 0
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	n, _ := strconv.Atoi(parts[len(parts)-1])
+	return n
+}
+
+func cableTypeFromSpeed(speed int) string {
+	switch {
+	case speed >= 10000:
+		return "dac-passive"
+	case speed >= 2500:
+		return "cat6a"
+	default:
+		return "cat6"
+	}
+}
+
+func isExpectedSNMPUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	l := strings.ToLower(err.Error())
+	return strings.Contains(l, "connection refused") ||
+		strings.Contains(l, "timeout") ||
+		strings.Contains(l, "deadline exceeded")
 }
 
 func lastIntSuffix(oid, base string) int {

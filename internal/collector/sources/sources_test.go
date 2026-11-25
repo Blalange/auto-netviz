@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/blalange/auto-netviz/internal/collector/sources/discovery"
 	"github.com/blalange/auto-netviz/internal/collector/sources/hostos"
 	"github.com/blalange/auto-netviz/internal/collector/sources/ipmi"
 	"github.com/blalange/auto-netviz/internal/collector/sources/lldp"
 	"github.com/blalange/auto-netviz/internal/collector/sources/redfish"
+	"github.com/blalange/auto-netviz/internal/collector/sources/snmp"
 	"github.com/blalange/auto-netviz/internal/collector/sources/unifi"
 )
 
@@ -145,5 +148,98 @@ func TestHostOSParser(t *testing.T) {
 	obs := hostos.ParseHostProbeOutput("hq", "10.10.10.80", "worker-01", "Dell Inc.", "PowerEdge R630", "9SYD132", "4C4C4544-0053-5910-8044-B9C04F313332", `PRETTY_NAME="Ubuntu 24.04"`, "6.8.0", []byte(lscpu), []byte(lsblk), []byte(ipAddr))
 	if obs.PrimaryIP != "10.10.10.80" || len(obs.Modules) != 2 || len(obs.Interfaces) != 1 {
 		t.Fatalf("unexpected HostOS obs: %+v", obs)
+	}
+}
+
+func TestUniFiGatewayMultiVLANAndClientOUI(t *testing.T) {
+	rawDevs := []map[string]any{
+		{"mac": "24:5a:4c:76:79:d1", "name": "UDM Pro", "type": "udm", "model": "UDMPRO", "serial": "UDM1", "state": float64(1), "lan_ip": "192.168.50.1"},
+	}
+	rawNets := []map[string]any{
+		{"name": "Default", "purpose": "corporate", "ip_subnet": "192.168.50.1/24"},
+		{"name": "OOB", "vlan": float64(4), "purpose": "corporate", "ip_subnet": "192.168.4.1/24"},
+		{"name": "Servers", "vlan": float64(6), "purpose": "corporate", "ip_subnet": "192.168.6.1/24"},
+	}
+	rawClients := []map[string]any{
+		{"mac": "08:9e:01:d8:7b:fb", "ip": "192.168.4.60", "oui": "Quanta Computer Inc.", "is_wired": true},
+	}
+
+	batch, _ := unifi.BuildBatch("c1", "glemmen", "default", "", rawDevs, rawNets, rawClients, map[string]string{"UDMPRO": "ubiquiti-udm-pro"}, nil, true)
+	var lanIPs []string
+	for _, d := range batch.Devices {
+		if d.Name == "UDM Pro" {
+			if d.ModelCode != "ubiquiti-udm-pro" {
+				t.Fatalf("expected mapped ModelCode ubiquiti-udm-pro, got %q", d.ModelCode)
+			}
+			for _, iface := range d.Interfaces {
+				if iface.Name == "lan" {
+					for _, ip := range iface.IPAddresses {
+						lanIPs = append(lanIPs, ip.Address)
+					}
+				}
+			}
+		}
+		if d.ObsKey == "client:08:9e:01:d8:7b:fb" && len(d.Claims.Hostnames) != 0 {
+			t.Fatalf("expected OUI vendor string not to enter Claims.Hostnames, got %v", d.Claims.Hostnames)
+		}
+	}
+	joined := strings.Join(lanIPs, ",")
+	for _, want := range []string{"192.168.50.1/24", "192.168.4.1/24", "192.168.6.1/24"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected gateway lan interface to contain %s, got %s", want, joined)
+		}
+	}
+}
+
+func TestRedfishGenericHostnameFiltered(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/redfish/v1", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"Systems": map[string]string{"@odata.id": "/redfish/v1/Systems"}})
+	})
+	mux.HandleFunc("/redfish/v1/Systems", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"Members": []map[string]string{{"@odata.id": "/redfish/v1/Systems/1"}}})
+	})
+	mux.HandleFunc("/redfish/v1/Systems/1", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"Manufacturer": "Dell Inc.", "Model": "PowerEdge R250", "SKU": "XYZ", "HostName": "dellinc"})
+	})
+	ts := httptest.NewTLSServer(mux)
+	defer ts.Close()
+
+	obs, err := redfish.ReadRedfish(context.Background(), ts.URL, "192.168.4.80", "glemmen", "", "u", "p", false, 5*time.Second, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs.Claims.Hostnames) != 0 {
+		t.Fatalf("expected generic HostName dellinc stripped, got %v", obs.Claims.Hostnames)
+	}
+}
+
+func TestDiscoveryProbeRedfishAndSNMPQBridgeMAC(t *testing.T) {
+	nonRedfish := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("<html><body>Router UI</body></html>"))
+	}))
+	defer nonRedfish.Close()
+	if discovery.ProbeRedfishURL(context.Background(), nonRedfish.URL, 2*time.Second) {
+		t.Fatalf("expected non-Redfish HTML 200 response to return false")
+	}
+
+	realRedfish := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"RedfishVersion":"1.6.0","@odata.id":"/redfish/v1"}`))
+	}))
+	defer realRedfish.Close()
+	if !discovery.ProbeRedfishURL(context.Background(), realRedfish.URL, 2*time.Second) {
+		t.Fatalf("expected valid Redfish ServiceRoot to return true")
+	}
+
+	unauthNonOdata := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer unauthNonOdata.Close()
+	if discovery.ProbeRedfishURL(context.Background(), unauthNonOdata.URL, 2*time.Second) {
+		t.Fatalf("expected 401 without OData-Version header to return false")
+	}
+
+	if got := snmp.ParseQBridgeMAC(".1.3.6.1.2.1.17.7.1.2.2.1.2.4.8.158.1.216.123.251"); got != "08:9e:01:d8:7b:fb" {
+		t.Fatalf("expected 08:9e:01:d8:7b:fb, got %q", got)
 	}
 }

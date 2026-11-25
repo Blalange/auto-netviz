@@ -243,6 +243,9 @@ func ReadRedfish(
 	powerState := strings.ToLower(str(sys["PowerState"]))
 	biosVer := str(sys["BiosVersion"])
 	hostName := str(sys["HostName"])
+	if isGenericRedfishHostname(hostName) {
+		hostName = ""
+	}
 	if hostName == "" {
 		hostName = hintName
 	}
@@ -460,7 +463,7 @@ func ReadRedfish(
 	if serial != "" {
 		claims.Serials = []string{serial}
 	}
-	if hostName != "" {
+	if hostName != "" && !isGenericRedfishHostname(hostName) {
 		claims.Hostnames = []string{hostName}
 	}
 
@@ -559,6 +562,16 @@ func str(v any) string {
 		return ""
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+func isGenericRedfishHostname(raw string) bool {
+	l := strings.ToLower(strings.TrimSpace(raw))
+	l = strings.NewReplacer(".", "", "-", "", "_", "", " ", "").Replace(l)
+	switch l {
+	case "", "dellinc", "dell", "localhost", "localhostlocaldomain", "idrac":
+		return true
+	}
+	return false
 }
 
 func firstNonEmpty(vals ...string) string {

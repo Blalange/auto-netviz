@@ -221,6 +221,37 @@ func BuildBatch(
 		FullSnapshot: true,
 	}
 
+	// Pre-collect gateway IPs from corporate/VLAN networks so the gateway device merges all its subnet IPs.
+	type netGateway struct {
+		cidr string
+		ip   string
+		name string
+	}
+	var gatewaySubnets []netGateway
+	seenGwCIDR := make(map[string]bool)
+	for _, net := range rawNets {
+		purpose := strings.ToLower(str(net["purpose"]))
+		if purpose != "" && purpose != "corporate" {
+			continue
+		}
+		subnet := str(net["ip_subnet"])
+		if subnet == "" {
+			continue
+		}
+		if pfx, err := netip.ParsePrefix(subnet); err == nil {
+			ipStr := pfx.Addr().String()
+			cidr := fmt.Sprintf("%s/%d", ipStr, pfx.Bits())
+			if !seenGwCIDR[cidr] {
+				seenGwCIDR[cidr] = true
+				gatewaySubnets = append(gatewaySubnets, netGateway{
+					cidr: cidr,
+					ip:   ipStr,
+					name: firstNonEmpty(str(net["name"]), "LAN"),
+				})
+			}
+		}
+	}
+
 	// Build unique names per MAC
 	nameCounts := make(map[string]int)
 	for _, d := range rawDevs {
@@ -269,6 +300,7 @@ func BuildBatch(
 		modelName := modelCode
 		if mapped, ok := models[modelCode]; ok && mapped != "" {
 			modelName = mapped
+			modelCode = mapped
 		}
 		serial := identity.NormalizeSerial(str(d["serial"]))
 		mgmtIP := firstNonEmpty(str(d["lan_ip"]), str(d["ip"]), nestedStr(d["config_network"], "ip"))
@@ -314,8 +346,18 @@ func BuildBatch(
 
 		if role == "gateway" {
 			var lanIPs []protocol.IPObservation
-			if lanIP := str(d["lan_ip"]); lanIP != "" {
+			lanIP := str(d["lan_ip"])
+			if lanIP != "" {
 				lanIPs = append(lanIPs, protocol.IPObservation{Address: lanIP + "/24", Primary: true})
+			}
+			for _, gw := range gatewaySubnets {
+				if gw.ip == "" || gw.ip == lanIP {
+					continue
+				}
+				lanIPs = append(lanIPs, protocol.IPObservation{
+					Address:     gw.cidr,
+					Description: "Gateway: " + gw.name,
+				})
 			}
 			if len(lanIPs) > 0 {
 				ifaces = append([]protocol.InterfaceObservation{{
@@ -505,15 +547,16 @@ func BuildBatch(
 				continue
 			}
 			isWired := toBool(cl["is_wired"])
-			cName := firstNonEmpty(str(cl["name"]), str(cl["hostname"]), str(cl["oui"]))
+			realName := firstNonEmpty(str(cl["name"]), str(cl["hostname"]))
+			cName := firstNonEmpty(realName, str(cl["oui"]))
 			ip := str(cl["ip"])
 			obsKey := "client:" + mac
 			claims := protocol.IdentityClaims{
 				MACs:     []string{mac},
 				Locators: map[string]string{},
 			}
-			if cName != "" {
-				claims.Hostnames = []string{cName}
+			if realName != "" {
+				claims.Hostnames = []string{realName}
 			}
 			if ip != "" {
 				claims.Locators["unifi_ip"] = ip
