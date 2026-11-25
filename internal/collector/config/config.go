@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,9 +27,38 @@ type Config struct {
 	Sources           SourcesConfig     `yaml:"sources"`
 }
 
+// IntKeyStringMap decodes YAML mappings whose keys may be either integers (4: foo)
+// or quoted numeric strings ("4": foo, as emitted by Helm's toYaml).
+type IntKeyStringMap map[int]string
+
+func (m *IntKeyStringMap) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+		*m = nil
+		return nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("expected mapping for int-key map, got kind %d", value.Kind)
+	}
+	out := make(IntKeyStringMap, len(value.Content)/2)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		kNode, vNode := value.Content[i], value.Content[i+1]
+		kInt, err := strconv.Atoi(strings.TrimSpace(kNode.Value))
+		if err != nil {
+			return fmt.Errorf("invalid integer map key %q: %w", kNode.Value, err)
+		}
+		var val string
+		if err := vNode.Decode(&val); err != nil {
+			return err
+		}
+		out[kInt] = val
+	}
+	*m = out
+	return nil
+}
+
 type DefaultsConfig struct {
 	UnifiModels    map[string]string `yaml:"unifi_models"`
-	UnifiVLANNames map[int]string    `yaml:"unifi_vlan_names"`
+	UnifiVLANNames IntKeyStringMap   `yaml:"unifi_vlan_names"`
 }
 
 type SourcesConfig struct {
@@ -64,7 +94,7 @@ type UnifiProfile struct {
 	SNMPCredential string            `yaml:"snmp_credential"`
 	IncludeClients *bool             `yaml:"include_clients"`
 	Models         map[string]string `yaml:"models"`
-	VLANNames      map[int]string    `yaml:"vlan_names"`
+	VLANNames      IntKeyStringMap   `yaml:"vlan_names"`
 }
 
 type StaticTarget struct {

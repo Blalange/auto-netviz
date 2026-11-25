@@ -15,6 +15,8 @@ spec:
       app.kubernetes.io/component: collector
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/collector-configmap.yaml") . | sha256sum }}
       labels:
         {{- include "auto-netviz.labels" . | nindent 8 }}
         app.kubernetes.io/component: collector
