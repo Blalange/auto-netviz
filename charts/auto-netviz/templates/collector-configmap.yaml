@@ -1,0 +1,16 @@
+{{- if .Values.collector.enabled }}
+{{- $cfg := deepCopy .Values.collector.config -}}
+{{- if not (hasKey $cfg "server_ws_url") -}}
+{{- $_ := set $cfg "server_ws_url" (printf "ws://%s-server:%v/ws/collector" (include "auto-netviz.fullname" .) .Values.server.service.port) -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-collector-config
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+data:
+  collector.yaml: |
+    {{- toYaml $cfg | nindent 4 }}
+{{- end }}

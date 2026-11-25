@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/server ./cmd/server
+COPY internal ./internal
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/auto-netviz-server ./cmd/server
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 1000 app
+COPY --from=build /out/auto-netviz-server /usr/local/bin/auto-netviz-server
+RUN mkdir -p /data /manual && chown -R 1000:1000 /data /manual
+USER 1000
+WORKDIR /app
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/auto-netviz-server"]
+CMD ["--listen", ":8080", "--db", "/data/auto-netviz.db", "--manual", "/manual"]

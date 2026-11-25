@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  go:
+    name: Go Test & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Go vet
+        run: go vet ./...
+      - name: Go test
+        run: go test -race -v ./...
+
+  web:
+    name: SvelteKit Check & Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run check
+      - name: Build
+        run: npm run build
+
+  helm:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint chart
+        run: helm lint charts/auto-netviz
+      - name: Template chart
+        run: helm template ci-test charts/auto-netviz >/dev/null

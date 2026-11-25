@@ -1,0 +1,106 @@
+nameOverride: ""
+fullnameOverride: ""
+
+server:
+  image:
+    repository: ghcr.io/blalange/auto-netviz-server
+    tag: "" # Defaults to Chart.appVersion
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+  persistence:
+    enabled: true
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+  retentionDays: 30
+  logLevel: info
+  manual:
+    existingConfigMap: ""
+    files: {}
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+web:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/blalange/auto-netviz-web
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+  env: []
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+collector:
+  enabled: true
+  demo: false
+  hostNetwork: false
+  dnsPolicy: ""
+  image:
+    repository: ghcr.io/blalange/auto-netviz-collector
+    tag: ""
+    pullPolicy: IfNotPresent
+  logLevel: info
+  capabilities: []
+  extraEnv: []
+  envFrom: []
+  rbac:
+    create: true
+    kubernetesReadOnly: true
+    secretGrants: []
+    # Example:
+    # - namespace: monitoring
+    #   name: unpoller-unifi
+  config:
+    collector_id: cluster-collector
+    name: Cluster Collector
+    site: default
+    zone: cluster
+    spool_dir: /spool
+    heartbeat_interval: 15s
+    schedules:
+      unifi: 60s
+      snmp: 60s
+      lldp: 30s
+      redfish: 120s
+      ipmi: 120s
+      discovery: 180s
+      hostos: 120s
+      kubernetes: 45s
+    sources: {}
+  resources:
+    requests:
+      cpu: 25m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: netviz.example.com
+  tls: []

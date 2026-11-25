@@ -1,0 +1,93 @@
+{{- if .Values.collector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-collector
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "auto-netviz.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: collector
+  template:
+    metadata:
+      labels:
+        {{- include "auto-netviz.labels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+    spec:
+      {{- if .Values.collector.rbac.create }}
+      serviceAccountName: {{ include "auto-netviz.serviceAccountName" . }}
+      {{- end }}
+      {{- if .Values.collector.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: {{ default "ClusterFirstWithHostNet" .Values.collector.dnsPolicy }}
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: collector
+          image: "{{ .Values.collector.image.repository }}:{{ include "auto-netviz.collectorTag" . }}"
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          args:
+            - --config=/config/collector.yaml
+            - --log-level={{ .Values.collector.logLevel }}
+            {{- if .Values.collector.demo }}
+            - --demo
+            {{- end }}
+          {{- with .Values.collector.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.collector.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              {{- if .Values.collector.capabilities }}
+              add:
+                {{- toYaml .Values.collector.capabilities | nindent 16 }}
+              {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: spool
+              mountPath: /spool
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "auto-netviz.fullname" . }}-collector-config
+        - name: spool
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.collector.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.collector.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

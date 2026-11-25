@@ -1,0 +1,18 @@
+{{- if .Values.server.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-data
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  accessModes:
+    {{- toYaml .Values.server.persistence.accessModes | nindent 4 }}
+  {{- if .Values.server.persistence.storageClassName }}
+  storageClassName: {{ .Values.server.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.server.persistence.size }}
+{{- end }}

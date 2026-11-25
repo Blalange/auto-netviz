@@ -1,0 +1,75 @@
+schema_version: 1
+
+defaults:
+  site: hq
+  owner: Platform Engineering
+  tags:
+    - production
+
+sites:
+  - id: hq
+    name: HQ Datacenter
+    status: active
+    facility: Building A - Floor 2
+    address: "100 Harbor Way"
+    description: Primary on-prem compute & switching rack.
+  - id: branch-lab
+    name: Edge Lab
+    status: active
+    facility: Lab Annex
+    description: Remote branch site connected via VPN.
+
+locations:
+  - id: dc-room-a
+    site: hq
+    name: Server Room A
+    description: Hot/cold aisle containment.
+  - id: spare-cage
+    site: hq
+    name: Spare Parts Cage
+    description: Audited hardware spares shelf.
+
+owner_groups:
+  - name: Infrastructure
+    description: Network, compute, storage, and facility teams.
+  - name: Product Teams
+    description: Application and ML workload owners.
+
+owners:
+  - name: Platform Engineering
+    group: Infrastructure
+    email: platform@example.org
+    link: https://wiki.example.org/platform
+    description: Owns core switching, Kubernetes nodes, and storage.
+  - name: Core Networking
+    group: Infrastructure
+    email: netops@example.org
+    description: Owns perimeter gateways, VLANs, and structured cabling.
+  - name: AI Research
+    group: Product Teams
+    email: ml@example.org
+    description: Owns GPU compute nodes.
+
+contacts:
+  - name: Alice Hansen
+    role: primary-oncall
+    owner: Platform Engineering
+    email: alice@example.org
+    phone: "+47 555 0101"
+  - name: Bob Nilsen
+    role: network-architect
+    owner: Core Networking
+    email: bob@example.org
+    phone: "+47 555 0102"
+
+rules:
+  auto_create:
+    network_devices: true
+    servers: true
+    wired_clients: true
+    wireless_clients: false
+  ignore:
+    cidrs:
+      - 169.254.0.0/16
+    mac_prefixes:
+      - 02:42:ac

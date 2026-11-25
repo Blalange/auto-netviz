@@ -1,0 +1,72 @@
+{{- if and .Values.collector.enabled .Values.collector.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "auto-netviz.serviceAccountName" . }}
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+---
+{{- if .Values.collector.rbac.kubernetesReadOnly }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-collector-read
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "services", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-collector-read
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "auto-netviz.fullname" . }}-collector-read
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "auto-netviz.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- range $idx, $grant := .Values.collector.rbac.secretGrants }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "auto-netviz.fullname" $ }}-secret-{{ $grant.name }}
+  namespace: {{ $grant.namespace }}
+  labels:
+    {{- include "auto-netviz.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: collector
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $grant.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "auto-netviz.fullname" $ }}-secret-{{ $grant.name }}
+  namespace: {{ $grant.namespace }}
+  labels:
+    {{- include "auto-netviz.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "auto-netviz.fullname" $ }}-secret-{{ $grant.name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "auto-netviz.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

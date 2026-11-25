@@ -1,0 +1,79 @@
+collector_id: hq-collector-01
+name: HQ Management Collector
+site: hq
+zone: oob-mgmt
+server_ws_url: ws://127.0.0.1:8080/ws/collector
+spool_dir: ./spool
+heartbeat_interval: 15s
+
+schedules:
+  unifi: 60s
+  snmp: 60s
+  lldp: 30s
+  redfish: 120s
+  ipmi: 120s
+  discovery: 180s
+  hostos: 120s
+  kubernetes: 45s
+
+sources:
+  unifi:
+    - name: hq-unifi
+      site: hq
+      url: { from_env: UNIFI_URL, default: "" }
+      unifi_site: default
+      username: { from_env: UNIFI_USER, default: "" }
+      password: { from_env: UNIFI_PASS, default: "" }
+      verify_tls: false
+      snmp_credential: default
+
+  snmp:
+    - name: default
+      community: { from_env: SNMP_COMMUNITY, default: public }
+      version: "2c"
+      timeout: 2s
+      retries: 1
+      auto_unifi: true
+      default: true
+
+  lldp:
+    - name: local-lldp
+      site: hq
+      passive_raw: false
+      lldpctl: true
+
+  redfish:
+    - name: default
+      username: { from_env: REDFISH_USER, default: readonly }
+      password: { from_env: REDFISH_PASS, default: readonly }
+      verify_tls: false
+      timeout: 15s
+      default: true
+
+  ipmi:
+    - name: default
+      username: { from_env: IPMI_USER, default: root }
+      password: { from_env: IPMI_PASS, default: calvin }
+      interface: lanplus
+      timeout: 15s
+      default: true
+
+  discovery:
+    - name: hq-lan
+      site: hq
+      cidrs: []
+      read_local_arp: true
+      probe_ports: [22, 80, 443, 161, 623]
+      probe_redfish: true
+      reverse_dns: true
+
+  hostos:
+    - name: local
+      site: hq
+      local: true
+
+  kubernetes:
+    - name: hq-k8s
+      site: hq
+      in_cluster: false
+      kubeconfig: { from_env: KUBECONFIG, default: "" }

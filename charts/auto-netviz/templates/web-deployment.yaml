@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-web
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "auto-netviz.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "auto-netviz.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: "{{ .Values.web.image.repository }}:{{ include "auto-netviz.webTag" . }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: BACKEND_INTERNAL_URL
+              value: "http://{{ include "auto-netviz.fullname" . }}-server:{{ .Values.server.service.port }}"
+            - name: PORT
+              value: "3000"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PROTOCOL_HEADER
+              value: "x-forwarded-proto"
+            - name: HOST_HEADER
+              value: "x-forwarded-host"
+            {{- with .Values.web.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

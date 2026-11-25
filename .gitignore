@@ -1,0 +1,25 @@
+# Binaries & build artifacts
+/bin/
+/dist/
+/server
+/collector
+*.db
+*.db-shm
+*.db-wal
+*.log
+/data/
+/spool/
+
+# Frontend
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
+/web/.env
+/web/.env.*
+!/web/.env.example
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

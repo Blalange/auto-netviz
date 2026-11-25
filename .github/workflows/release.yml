@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  images:
+    name: Build & Push Container Images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: server
+            dockerfile: docker/Dockerfile.server
+            image: ghcr.io/blalange/auto-netviz-server
+          - component: collector
+            dockerfile: docker/Dockerfile.collector
+            image: ghcr.io/blalange/auto-netviz-collector
+          - component: web
+            dockerfile: docker/Dockerfile.web
+            image: ghcr.io/blalange/auto-netviz-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.image }}
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=sha-
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/blalange/auto-netviz
+            org.opencontainers.image.title=auto-netviz-${{ matrix.component }}
+            org.opencontainers.image.url=https://github.com/blalange/auto-netviz
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  helm:
+    name: Package & Push Helm Chart
+    runs-on: ubuntu-latest
+    needs: [images]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Determine chart version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk '/^version:/ {print $2; exit}' charts/auto-netviz/Chart.yaml)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Lint Helm chart
+        run: helm lint charts/auto-netviz
+
+      - name: Package Helm chart
+        run: |
+          helm package charts/auto-netviz \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.version }}"
+
+      - name: Login to GHCR OCI registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push Helm chart to GHCR
+        run: |
+          helm push "auto-netviz-${{ steps.version.outputs.version }}.tgz" oci://ghcr.io/blalange/charts
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: "auto-netviz-${{ steps.version.outputs.version }}.tgz"

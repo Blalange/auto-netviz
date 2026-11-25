@@ -1,0 +1,141 @@
+schema_version: 1
+
+device_types:
+  - id: ubiquiti-udm-pro
+    manufacturer: Ubiquiti
+    model: Dream Machine Pro
+    u_height: 1
+    depth: half
+    role_hint: gateway
+    airflow: front-to-rear
+    faceplate:
+      front:
+        - kind: lcd
+          label: UDM
+          width: 2
+        - kind: port_grid
+          connector: rj45
+          rows: 2
+          cols: 4
+          start: 1
+          prefix: "Port "
+        - kind: port_grid
+          connector: rj45
+          rows: 1
+          cols: 1
+          start: 9
+          prefix: "Port "
+        - kind: port_grid
+          connector: sfpp
+          rows: 2
+          cols: 1
+          start: 10
+          prefix: "Port "
+      rear:
+        - kind: power
+          connector: iec-c14
+          count: 1
+
+  - id: ubiquiti-usw-pro-24-poe
+    manufacturer: Ubiquiti
+    model: USW-Pro-24-PoE
+    u_height: 1
+    depth: half
+    role_hint: switch
+    airflow: front-to-rear
+    faceplate:
+      front:
+        - kind: lcd
+          label: USW
+          width: 2
+        - kind: port_grid
+          connector: rj45
+          rows: 2
+          cols: 12
+          start: 1
+          prefix: "Port "
+          poe: true
+        - kind: port_grid
+          connector: sfpp
+          rows: 2
+          cols: 1
+          start: 25
+          prefix: "Port "
+      rear:
+        - kind: power
+          connector: iec-c14
+          count: 1
+
+  - id: dell-poweredge-r650
+    manufacturer: Dell
+    model: PowerEdge R650
+    u_height: 1
+    depth: full
+    role_hint: server
+    airflow: front-to-rear
+    faceplate:
+      front:
+        - kind: drive_bays
+          form_factor: "2.5"
+          count: 8
+          prefix: "Drive "
+      rear:
+        - kind: psu_bays
+          count: 2
+          prefix: "PSU "
+        - kind: mgmt_port
+          name: iDRAC
+        - kind: port_grid
+          connector: rj45
+          rows: 1
+          cols: 2
+          names: [eno1, eno2]
+        - kind: port_grid
+          connector: sfpp
+          rows: 1
+          cols: 2
+          names: [ens1f0, ens1f1]
+
+  - id: dell-poweredge-r750xs
+    manufacturer: Dell
+    model: PowerEdge R750xs
+    u_height: 2
+    depth: full
+    role_hint: server
+    airflow: front-to-rear
+    faceplate:
+      front:
+        - kind: drive_bays
+          form_factor: "3.5"
+          count: 12
+          prefix: "Drive "
+      rear:
+        - kind: psu_bays
+          count: 2
+          prefix: "PSU "
+        - kind: mgmt_port
+          name: iDRAC
+        - kind: port_grid
+          connector: sfpp
+          rows: 1
+          cols: 2
+          names: [ens1f0, ens1f1]
+
+  - id: apc-ap4423a
+    manufacturer: APC
+    model: AP4423A ATS
+    u_height: 1
+    depth: half
+    role_hint: power
+    airflow: passive
+    faceplate:
+      front:
+        - kind: lcd
+          label: ATS
+          width: 3
+        - kind: mgmt_port
+          name: mgmt
+      rear:
+        - kind: power
+          connector: iec-c14
+          count: 8

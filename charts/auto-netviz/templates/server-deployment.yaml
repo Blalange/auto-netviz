@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "auto-netviz.fullname" . }}-server
+  labels:
+    {{- include "auto-netviz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  # SQLite uses a ReadWriteOnce PVC; Recreate prevents multi-attach rollouts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "auto-netviz.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "auto-netviz.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: "{{ .Values.server.image.repository }}:{{ include "auto-netviz.serverTag" . }}"
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          args:
+            - --listen=:8080
+            - --db=/data/auto-netviz.db
+            - --manual=/manual
+            - --retention-days={{ .Values.server.retentionDays }}
+            - --log-level={{ .Values.server.logLevel }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: manual
+              mountPath: /manual
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.server.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "auto-netviz.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: manual
+          configMap:
+            name: {{ default (printf "%s-manual" (include "auto-netviz.fullname" .)) .Values.server.manual.existingConfigMap }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

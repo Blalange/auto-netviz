@@ -1,0 +1,213 @@
+schema_version: 1
+
+vlans:
+  - site: hq
+    vid: 1
+    name: Default
+    color: "#64748b"
+  - site: hq
+    vid: 4
+    name: Out-of-Band Management
+    color: "#f59e0b"
+  - site: hq
+    vid: 10
+    name: Compute Cluster
+    color: "#3b82f6"
+  - site: hq
+    vid: 20
+    name: Storage Replication
+    color: "#8b5cf6"
+
+prefixes:
+  - cidr: 10.10.4.0/24
+    site: hq
+    vlan: 4
+    gateway: 10.10.4.1
+    description: OOB / iDRAC / IPMI network
+  - cidr: 10.10.10.0/24
+    site: hq
+    vlan: 10
+    gateway: 10.10.10.1
+    description: Kubernetes nodes & management
+  - cidr: 10.10.20.0/24
+    site: hq
+    vlan: 20
+    gateway: 10.10.20.1
+    description: High-speed Ceph replication
+
+racks:
+  - name: HQ-Rack-01
+    site: hq
+    location: dc-room-a
+    status: active
+    width: 19
+    u_height: 24
+    power_budget_w: 3200
+    description: Main compute & switching rack (ordered top to bottom).
+    layout:
+      - gap: 1
+      - device: hq-gw-01
+        face: rear
+      - device: hq-sw-01
+        face: rear
+      - gap: 2
+      - device: node-01
+      - device: node-02
+      - gap: 1
+      - device: storage-01
+      - gap: 2
+      - device: ats-01
+      - gap: 11
+
+devices:
+  - name: hq-gw-01
+    site: hq
+    role: gateway
+    device_type: ubiquiti-udm-pro
+    owner: Core Networking
+    asset_tag: AST-1001
+    identity:
+      serial: "UDMP77889900"
+      macs: ["24:5a:4c:10:00:01"]
+    collect:
+      snmp:
+        ip: 10.10.10.1
+    interfaces:
+      - name: Port 11
+        type: 10gbase-x-sfpp
+        ip_addresses:
+          - address: 10.10.10.1/24
+            dns_name: hq-gw-01
+            primary: true
+
+  - name: hq-sw-01
+    site: hq
+    role: switch
+    device_type: ubiquiti-usw-pro-24-poe
+    owner: Core Networking
+    asset_tag: AST-1002
+    identity:
+      serial: "USW2411223344"
+      macs: ["ac:8b:a9:20:00:01"]
+    collect:
+      snmp:
+        ip: 10.10.10.2
+        interfaces: true
+        cables: true
+    uplinks:
+      - interface: Port 25
+        switch: hq-gw-01
+        port: "Port 11"
+        type: dac-passive
+
+  - name: node-01
+    site: hq
+    role: control-plane
+    device_type: dell-poweredge-r650
+    owner: Platform Engineering
+    asset_tag: AST-2001
+    warranty_until: 2029-05-01
+    oob_ip: 10.10.4.11
+    identity:
+      service_tag: 7X9K2M1
+      system_uuid: 4c4c4544-0058-3910-804b-b7c04f324d31
+    collect:
+      redfish: { ip: 10.10.4.11 }
+      kubernetes: { node: node-01, cluster: hq-k8s }
+    uplinks:
+      - interface: ens1f0
+        switch: hq-sw-01
+        port: "26"
+        type: dac-passive
+      - interface: eno1
+        switch: hq-sw-01
+        port: "1"
+        type: cat6
+    interfaces:
+      - name: iDRAC
+        type: 1000base-t
+        mgmt_only: true
+        mac_address: 6c:3c:8c:10:00:11
+        untagged_vlan: 4
+        ip_addresses:
+          - address: 10.10.4.11/24
+            dns_name: idrac-node-01
+
+  - name: node-02
+    site: hq
+    role: worker
+    device_type: dell-poweredge-r650
+    owner: AI Research
+    asset_tag: AST-2002
+    warranty_until: 2029-05-01
+    oob_ip: 10.10.4.12
+    identity:
+      service_tag: 7X9K2M2
+      system_uuid: 4c4c4544-0058-3910-804b-b7c04f324d32
+    collect:
+      redfish: { ip: 10.10.4.12 }
+      kubernetes: { node: node-02, cluster: hq-k8s }
+    uplinks:
+      - interface: eno1
+        switch: hq-sw-01
+        port: "2"
+        type: cat6
+
+  - name: storage-01
+    site: hq
+    role: storage
+    device_type: dell-poweredge-r750xs
+    owner: Platform Engineering
+    asset_tag: AST-3001
+    warranty_until: 2030-01-15
+    oob_ip: 10.10.4.20
+    identity:
+      service_tag: 9STG440
+    collect:
+      ipmi: { ip: 10.10.4.20 }
+    uplinks:
+      - interface: ens1f0
+        switch: hq-sw-01
+        port: "3"
+        type: cat6a
+
+  - name: ats-01
+    site: hq
+    role: power
+    device_type: apc-ap4423a
+    owner: Infrastructure
+    asset_tag: AST-4001
+    interfaces:
+      - name: mgmt
+        type: 1000base-t
+        mgmt_only: true
+        untagged_vlan: 4
+        ip_addresses:
+          - address: 10.10.4.30/24
+            primary: true
+
+assets:
+  - asset_tag: AST-9001
+    name: Spare 16TB SAS Enterprise HDD
+    category: storage
+    manufacturer: Seagate
+    model: ST16000NM002G
+    serial: ZRS99011
+    status: in-stock
+    site: hq
+    location: spare-cage
+    owner: Platform Engineering
+    purchase_date: 2026-01-10
+    warranty_until: 2031-01-10
+    notes: Cold spare for storage-01 drive bays.
+  - asset_tag: AST-9002
+    name: Fluke LinkIQ Cable Tester
+    category: tooling
+    manufacturer: Fluke
+    model: LIQ-100
+    serial: FLK202604
+    status: active
+    site: hq
+    location: spare-cage
+    owner: Core Networking
+    purchase_date: 2025-09-20

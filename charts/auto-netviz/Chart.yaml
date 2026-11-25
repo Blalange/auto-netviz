@@ -1,0 +1,18 @@
+apiVersion: v2
+name: auto-netviz
+description: Auto Netviz — declarative + auto-discovered network, rack, cabling, asset, and ownership visualizer with Time Machine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - networking
+  - topology
+  - dcim
+  - ipam
+  - rack
+  - snmp
+  - redfish
+  - unifi
+home: https://github.com/blalange/auto-netviz
+sources:
+  - https://github.com/blalange/auto-netviz
